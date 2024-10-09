@@ -1,0 +1,146 @@
+
+#Usage example on cluster 
+
+#nohup snakemake -j 8000  -s Snakemake_alignment_and_phylogenies_step4   --cluster "sbatch -J {params.name} -p normal -N 1 --cpus-per-task  {params.threads}  --exclude='pbil-deb33' -o {params.out}  " &> nohup_Snakemake_alignment_and_phylogenies_step4.out &
+
+
+import re 
+import os 
+from Bio import SeqIO
+#Define your paths :
+Cluster_seq_path="/beegfs/data/bguinet/Cynipoidea_project/Clustering/Cluster_seq_dNdS_filamentous/" #The path where all cluster seq not aligned will be present
+Cluster_alignment_path="/beegfs/data/bguinet/Cynipoidea_project/Clustering/Cluster_alignment_dNdS_filamentous/" #The path where all aligned cluster seq will be present
+Cluster_phylogeny_path="/beegfs/data/bguinet/Cynipoidea_project/Clustering/Cluster_phylogeny_dNdS_filamentous/"  #The path where all cluster phylognies seq will be present
+
+Monophyletic_assessment_path="/beegfs/data/bguinet/Cynipoidea_project/Monophyletic_assessment/"
+Clustering_path="/beegfs/data/bguinet/Cynipoidea_project/Clustering/"
+
+
+#Softs 
+mmseqs="/beegfs/data/bguinet/TOOLS/mmseqs/bin/mmseqs"
+
+
+#If more than 2 taxa : 
+def file_size(filePath):
+    with open(filePath, 'r') as myfile:
+            data=myfile.read().replace('\n', ' ')
+            nb=data.count(">")
+            return nb
+
+Nb_taxa_in_phylo=10
+
+#For alignment with more than Nb_taxa_in_phylo taxa
+SAMPLES=[]
+for file in os.listdir(Cluster_seq_path):
+    taxa_list=[]
+    if 'ALL_DNA_seqs' in file:
+      continue
+    elif '_NT' in file:
+      continue
+    else:
+     if file.endswith(".fna"):
+      taxa_list=[]
+      for record in SeqIO.parse(Cluster_seq_path+"/"+file, "fasta"):
+         taxa_list.append(record.id)
+      if len(list(dict.fromkeys(taxa_list)))>2:
+         Clustername=re.sub(".fna","",file)
+         SAMPLES.append(Clustername)
+
+
+
+SAMPLES2=[]
+for file in os.listdir(Cluster_alignment_path):
+    if file.endswith("_AA.fna"):
+      Clustername=re.sub("_AA.fna","",file)
+      SAMPLES2.append(Clustername)
+
+#SAMPLES=['Cluster1677-Cluster463-Cluster352-Cluster1676-Cluster648_LbFVorf108']      
+rule all:
+  input:
+        expand(Cluster_alignment_path+"{cluster_number}_AA.fna", cluster_number = SAMPLES),
+        expand(Cluster_phylogeny_path+"{cluster_number2}_AA.fna.treefile", cluster_number2 = SAMPLES2),
+        Monophyletic_assessment_path+"Monophyletic_table.tab",
+        Clustering_path+"dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores_synteny_event.tab"
+
+#Run MACSE codon alignment analysis 
+rule MACSE_cluster_alignment:
+  params:
+     threads = "1",
+     time = "62:00:00",
+     name = "Codon_alignment_{cluster_number}",
+     out = Cluster_alignment_path+"MACSE_run_{cluster_number}.out",
+     err = Cluster_alignment_path+"MACSE_run_{cluster_number}.error"
+  input:
+     Cluster_file=Cluster_seq_path+"{cluster_number}.fna"
+  output: 
+     Alignment_cluster_file_AA=Cluster_alignment_path+"{cluster_number}_AA.fna",
+     Alignment_cluster_file_DNA=Cluster_alignment_path+"{cluster_number}_NT.fna",
+     Alignment_cluster_file_DNA_trimmed=Cluster_alignment_path+"{cluster_number}_NT.fna.trimmed"
+  shell:
+     """
+     hostname
+     #export JAVA_HOME=/usr/local/jre1.8.0_202/
+     #export PATH=/usr/local/jre1.8.0_202/bin:$PATH
+     cd {Cluster_seq_path}
+     DEST=$(basename {input.Cluster_file})
+     sed -i "s@\\*@@g" {input.Cluster_file}
+     sed -i "s@(+):@_+__@g" {input.Cluster_file}
+     sed -i "s@(-):@_-__@g" {input.Cluster_file} 
+     sed -i "s@:@_@g" {input.Cluster_file}
+     java -jar /beegfs/data/bguinet/TOOLS/macse_v2.05.jar -prog alignSequences -seq {input.Cluster_file} 
+     DEST_NT=$(echo $DEST | sed 's/.fna/_NT.fna/')
+     DEST_AA=$(echo $DEST | sed 's/.fna/_AA.fna/')
+     mv {Cluster_seq_path}$DEST_NT {Cluster_alignment_path}
+     mv {Cluster_seq_path}$DEST_AA {Cluster_alignment_path}
+     #Trim codon alignmnent
+     sed -i 's@!@-@g' {output.Alignment_cluster_file_AA}
+     sed -i 's@!@-@g' {output.Alignment_cluster_file_DNA}
+     /beegfs/data/bguinet/TOOLS/trimal/source/readal -in {output.Alignment_cluster_file_DNA} -out {output.Alignment_cluster_file_DNA}.unaligned -onlyseqs
+     /beegfs/data/bguinet/TOOLS/trimal/source/trimal -backtrans {output.Alignment_cluster_file_DNA}.unaligned -in {output.Alignment_cluster_file_AA} -automated1 -resoverlap 0.30 -seqoverlap 30 -fasta -ignorestopcodon -out {output.Alignment_cluster_file_DNA_trimmed}
+     """
+
+
+#Run IQTREE analysis 
+rule Cluster_phylogeny:
+  params:
+    threads = "5",
+    time = "5:00:00",
+    name = "Cluster_phylogeny_{cluster_number2}",
+    out = Cluster_phylogeny_path+"IQTREE_run_{cluster_number2}.out",
+    err = Cluster_phylogeny_path+"IQTREE_run_{cluster_number2}.error"
+  input:
+    Cluster_alignment_file=Cluster_alignment_path+"{cluster_number2}_AA.fna"
+  output:
+    Cluster_alignment_output=Cluster_phylogeny_path+"{cluster_number2}_AA.fna.treefile"
+  shell:
+    """
+    sed -i 's@!@-@g' {input.Cluster_alignment_file}
+    /beegfs/data/bguinet/TOOLS/iqtree-2.1.2-Linux/bin/iqtree2 -s {input.Cluster_alignment_file} -m MFP -alrt 1000  -nt {params.threads} -redo
+    sed -i 's@____@_+__@g' {Cluster_alignment_path}{wildcards.cluster_number2}_AA.fna.treefile
+    mv {Cluster_alignment_path}{wildcards.cluster_number2}_AA.fna.* {Cluster_phylogeny_path}
+    """
+
+
+
+###
+#Run Event analysis 
+rule Asses_events_along_phylogeny:
+  params:
+    threads = "1",
+    time = "15:00",
+    name = "Cynipoidea_monophyletique_assessment",
+    out = Monophyletic_assessment_path+"Cynipoidea_monophyletique_assessment.out",
+    err = Monophyletic_assessment_path+"Cynipoidea_monophyletique_assessment.error"
+  input:
+    treefile = Monophyletic_assessment_path+"Cynipoidea_phylogeny.nwk",
+    Cluster_directory = Cluster_phylogeny_path,
+    Blast_table_scores = Clustering_path+"dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores_synteny.tab",
+    taxo_table = Monophyletic_assessment_path+"Species_sub_sup_families_order.txt",
+  output:
+    Output_table_file = Monophyletic_assessment_path+"Monophyletic_table.tab",
+    output_monop = Clustering_path+"dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores_synteny_event.tab"
+  shell:
+    """
+    /beegfs/data/soft/R-4.0.5/bin/Rscript /beegfs/data/bguinet/Cynipoidea_project/Monophyletic_assessment.R {input.treefile} {input.Cluster_directory} 0.8 {input.Blast_table_scores} {input.taxo_table} {output.Output_table_file}
+    python3 /beegfs/data/bguinet/Cynipoidea_project/Add_Monophyletic_table.py -M {output.Output_table_file} -b {input.Blast_table_scores} -o {output.output_monop}
+    """

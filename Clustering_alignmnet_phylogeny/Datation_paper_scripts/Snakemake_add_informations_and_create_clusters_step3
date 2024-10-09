@@ -1,0 +1,111 @@
+
+
+
+from Bio import SeqIO 
+import pandas as pd
+import re
+import os
+
+
+# usage example 
+#nohup snakemake -j 8000  -s Snakemake_add_informations_step3  --cluster "sbatch -J {params.name} -p normal -N 1 --cpus-per-task  {params.threads}  --exclude='pbil-deb33' -o {params.out} -e {params.err}  " &> nohup_Clustering_snakemake.out &
+#
+#Output clustering directory
+Output_cluster_dir="/beegfs/data/bguinet/Cynipoidea_project/Clustering/"
+Output_cluster_seqs="/beegfs/data/bguinet/Cynipoidea_project/Clustering/Cluster_seqs"
+Output_cluster_ali="/beegfs/data/bguinet/Cynipoidea_project/Clustering/Cluster_alignment"
+Output_cluster_hmm="/beegfs/data/bguinet/Cynipoidea_project/Clustering/Cluster_hmmer"
+Output_metaeuk_repeat="/beegfs/data/bguinet/Cynipoidea_project/Metaeuk_and_repeat_analysis/"
+
+
+mmseqs="/beegfs/data/bguinet/TOOLS/mmseqs/bin/mmseqs"
+metaeuk="/beegfs/data/bguinet/TOOLS/metaeuk/build/bin/metaeuk"
+
+List_clusters=[]
+for filename in os.listdir(Output_cluster_seqs):
+    if filename.endswith(".aa"):
+      List_clusters.append(re.sub('.aa','',filename))
+
+
+rule all:
+        input:
+                Output_cluster_dir+"dsDNA_hmmer_clusters_cov_NR_ORF.tab",
+                Output_metaeuk_repeat+"Metaeuk_preds_results.fas",
+                Output_metaeuk_repeat+"All_candidate_scaffold_run_repeat_result.m8",
+                Output_cluster_dir+"dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores.tab"
+               
+rule Add_clusters_informations:
+  params:
+    threads="5",
+    time="6:00:00",
+    name="Add_clusters_informations",
+    out=Output_cluster_dir+"/Add_clusters_informations.out",
+    err=Output_cluster_dir+"/Add_clusters_informations.error"
+  input:
+    Cluster_tab=Output_cluster_dir+"ALL_Predicted_and_known_ORFs_cluster.tab"
+  output:
+    Cluster_with_informations=Output_cluster_dir+"dsDNA_hmmer_clusters_cov_NR_ORF.tab"
+  shell:
+    """
+    python3 Gather_hmmer_clusters_and_add_informations.py -p /beegfs/data/bguinet/Cynipoidea_project/Clustering/Cluster_hmmer -b {input.Cluster_tab} -out1 {Output_cluster_dir}/dsDNA_hmmer_clusters.tab -out2 {Output_cluster_dir}/dsDNA_hmmer_clusters_cov.tab  -out3 {Output_cluster_dir}/dsDNA_hmmer_clusters_cov_NR.tab -out4 {output.Cluster_with_informations}
+    """
+
+
+rule Add_metaeuk_repeat_and_syntenie_informations:
+  params:
+    threads="15",
+    time="12:00:00",
+    name="Add_metaeuk_repeat_informations",
+    out=Output_cluster_dir+"/Add_metaeuk_repeat_informations.out",
+    err=Output_cluster_dir+"/Add_metaeuk_repeat_informations.error"
+  input:
+    Cluster_tab=Output_cluster_dir+"dsDNA_hmmer_clusters_cov_NR_ORF.tab",
+    Scaffolds_with_EVEs="/beegfs/data/bguinet/Cynipoidea_project/All_candidate_scaffold.fna",
+  output:
+    metaeuk_proteins_db=Output_metaeuk_repeat+"All_candidate_scaffold_db_metaeuk",
+    metaeuk_fasta_prediction=Output_metaeuk_repeat+"Metaeuk_preds_results.fas",
+    mmseqs_proteins_db=Output_metaeuk_repeat+"All_candidate_scaffold_db_mmseqs",
+    Repeat_results=Output_metaeuk_repeat+"All_candidate_scaffold_run_repeat_result.m8",
+    Cluster_with_informations=Output_cluster_dir+"dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores.tab",
+    Synteny_output=Output_cluster_dir+"dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores_synteny.tab"
+  shell:
+    """
+    # Run the metaeuk analysis
+    cd {Output_metaeuk_repeat}
+    
+    {metaeuk}  createdb {input.Scaffolds_with_EVEs} {output.metaeuk_proteins_db}
+
+    {metaeuk} easy-predict {output.metaeuk_proteins_db} /beegfs/data/bguinet/TOOLS/UniProtKB Metaeuk_preds_results Metaeuk_preds_tmp --threads {params.threads}
+
+    {metaeuk} taxtocontig {output.metaeuk_proteins_db}  {output.metaeuk_fasta_prediction} Metaeuk_preds_results.headersMap.tsv /beegfs/data/bguinet/TOOLS/UniProtKB Taxa_Metaeuk_preds_results Taxa_Metaeuk_preds_tmp --majority 0.5 --tax-lineage 1 --lca-mode 2 --threads {params.threads}
+
+    # Run the BlastX repeat analysis 
+    {mmseqs} createdb {input.Scaffolds_with_EVEs} {output.mmseqs_proteins_db}
+    {mmseqs} search {output.mmseqs_proteins_db} /beegfs/data/bguinet/these/Repeat_env_analysis2/RepeatPeps_db {Output_metaeuk_repeat}All_candidate_scaffold_run_repeat_result {Output_metaeuk_repeat}All_candidate_scaffold_run_repeat_tpm  -s 7.5 --threads {params.threads}  --remove-tmp-files
+    {mmseqs} convertalis --format-output "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,qlen,tlen,tcov" {output.mmseqs_proteins_db} /beegfs/data/bguinet/these/Repeat_env_analysis2/RepeatPeps_db {Output_metaeuk_repeat}All_candidate_scaffold_run_repeat_result {output.Repeat_results} --threads {params.threads} 
+    python3 /beegfs/data/bguinet/Cynipoidea_project/Add_metaeuk_repeat_and_scores.py -MEuk_contig {Output_metaeuk_repeat}Taxa_Metaeuk_preds_results_tax_per_contig.tsv  -MEuk_pred {Output_metaeuk_repeat}Taxa_Metaeuk_preds_results_tax_per_pred.tsv  -TE {output.Repeat_results} --main_file {Output_cluster_dir}dsDNA_hmmer_clusters_cov_NR_ORF.tab -o {output.Cluster_with_informations}
+    #To decide of the threshold we need to first run the /beegfs/data/bguinet/Cynipoidea_project/Synteny_simulation.py script 
+    /beegfs/data/bguinet/Cynipoidea_project/Synteny_analysis.py --main_file /beegfs/data/bguinet/Cynipoidea_project/Clustering/dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores.tab -o {output.Synteny_output}
+    """
+
+
+rule Create_final_clusters:
+  params:
+    threads="1",
+    time="1:00:00",
+    name="Create_final_clusters",
+    out=Output_cluster_dir+"/Create_final_clusters.out",
+    err=Output_cluster_dir+"/Create_final_clusters.error"
+  input:
+    Cluster_tab=Output_cluster_dir+"dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores_synteny.tab"
+  output:
+    Cluster_with_informations=Output_cluster_dir+"dsDNA_hmmer_clusters_cov_NR_ORF.tab"
+  shell:
+    """
+    python3 /beegfs/data/bguinet/Cynipoidea_project/Create_final_clusters.py  -main /beegfs/data/bguinet/Cynipoidea_project/Clustering/dsDNA_hmmer_clusters_cov_NR_ORF_euk_repeat_scores_synteny.tab \
+      -ORF /beegfs/data/bguinet/Cynipoidea_project/ORF_analysis/All_candidate_scaffold_orfipy.faa \
+      -EVE /beegfs/data/bguinet/Cynipoidea_project/ORF_analysis/All_candidate_EVEs.faa \
+      -Viral /beegfs/data/bguinet/Cynipoidea_project/Clustering/ALL_Predicted_and_known_ORFs_and_EVEs_and_new.faa \
+      -o /beegfs/data/bguinet/Cynipoidea_project/Clustering/dsDNA_hmmer_binary.txt \
+      -which cynipid
+    """
